@@ -6,7 +6,7 @@ import glob
 import subprocess
 import shutil
 import re
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from DrissionPage import ChromiumPage, ChromiumOptions
 from app.configs.settings import settings
@@ -244,9 +244,24 @@ class WBScraperService:
                     return  # 🔴 不达标，直接结束方法，不下载
             # ==============================================================
 
-            for vid in variant_ids:
-                self.process_single_variant(vid, products_map.get(vid))
-                time.sleep(random.uniform(0.3, 0.8))
+            # 🚀 优化点：开启变体级并发
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+            print(f"   ⚡ 开启变体并发，当前组共 {len(variant_ids)} 个变体同时开足马力...")
+
+            # 使用最大 5 个工作线程并发处理变体，你可以根据网络情况调大或调小 max_workers
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = {
+                    executor.submit(self.process_single_variant, vid, products_map.get(vid)): vid
+                    for vid in variant_ids
+                }
+                for future in as_completed(futures):
+                    try:
+                        # 阻塞直到该变体处理完成
+                        future.result()
+                    except Exception as e:
+                        vid = futures[future]
+                        print(f"   ⚠️ 变体 {vid} 采集异常: {e}")
+
         except Exception as e:
             print(f"   ⚠️ 分析变体组出现异常: {e}")
             self.process_single_variant(input_id)
@@ -290,11 +305,29 @@ class WBScraperService:
 
             print(f"   📥 正在并发下载 {pics} 张图片...")
             with ThreadPoolExecutor(max_workers=8) as executor:
-                executor.map(_download_img, range(1, pics + 1))
+                futures = []
 
-            # 下载视频逻辑
-            if card_data.get('media', {}).get('has_video', False):
-                self.download_video(product_id, save_path)
+                # 1. 提交所有图片下载任务
+                for i in range(1, pics + 1):
+                    futures.append(executor.submit(_download_img, i))
+
+                # 2. 提交视频下载任务 (如果有)
+                if card_data.get('media', {}).get('has_video', False):
+                    futures.append(executor.submit(self.download_video, product_id, save_path))
+
+                # 3. 阻塞等待当前变体的所有图和视频下载完成
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"   ⚠️ 媒体下载子任务异常: {e}")
+
+
+            #     executor.map(_download_img, range(1, pics + 1))
+            #
+            # # 下载视频逻辑
+            # if card_data.get('media', {}).get('has_video', False):
+            #     self.download_video(product_id, save_path)
 
             self._save_to_db(product_id, card_data, detail_data, save_path)
             print(f"   ✅ 已采集并入库: {product_id}")
