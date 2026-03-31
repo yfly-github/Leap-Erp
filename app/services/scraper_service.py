@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import time
@@ -9,18 +10,16 @@ import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 from DrissionPage import ChromiumPage, ChromiumOptions
-from app.configs.settings import settings
-from app.configs.database import SessionLocal, engine
-from app.entities.wb_product_entity import Base
-from app.repository.wb_product_repository import WBProductRepository
-from app.utils.http_client import request_with_retry, download_file_with_retry
 
-# 确保数据库表存在
-Base.metadata.create_all(bind=engine)
+from app.configs.database import SessionLocal
+from app.core.database import settings, AsyncSessionLocal
+from app.repository.wb_product_repository import WBProductRepository
+from app.repository.wb_sync_product_repository import SyncWBProductRepository
+from app.utils.http_client import request_with_retry, download_file_with_retry
 
 
 class WBScraperService:
-    def __init__(self, supplier_id=None, use_filter=False, filter_fb=0, filter_rate=0.0, fbs_only=False):
+    def __init__(self, supplier_id=None, use_filter=False, min_fb=0,max_fb=9999999, filter_rate=0.0, fbs_only=False):
         self.supplier_id = supplier_id
         self.base_dir = settings.base_data_dir
 
@@ -38,7 +37,8 @@ class WBScraperService:
         self.basket_config_loaded = False
 
         self.filter_enabled = use_filter
-        self.min_feedbacks = filter_fb
+        self.min_feedbacks = min_fb
+        self.max_feedbacks = max_fb
         self.min_rating = filter_rate
         self.fbs_only = fbs_only
         self.official_fbo_ids = set()
@@ -146,8 +146,19 @@ class WBScraperService:
         mp4_path = os.path.join(save_path, "video.mp4")
         if shutil.which("ffmpeg"):
             print(f"   ⬇️ 正在调用 FFmpeg 下载 MP4...")
-            cmd = ["ffmpeg", "-y", "-i", found_url, "-c", "copy", "-bsf:a", "aac_adtstoasc", "-loglevel", "error",
-                   mp4_path]
+            cmd = [
+                "ffmpeg", "-y",
+                "-user_agent",
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+                "-reconnect", "1",
+                "-reconnect_streamed", "1",
+                "-reconnect_delay_max", "15",  # 最大重试等待时间（秒）
+                "-i", found_url,
+                "-c", "copy",
+                "-bsf:a", "aac_adtstoasc",
+                "-loglevel", "error",
+                mp4_path
+            ]
             try:
                 subprocess.run(cmd, check=True, stdout=subprocess.DEVNULL)
                 print(f"   🎉 视频下载成功")
@@ -158,8 +169,9 @@ class WBScraperService:
         if not self.headers and not self.get_headers_stealth(): return
         print(f"🔎 开始扫描店铺: {self.supplier_id}")
         page, no_fb_count = 1, 0
+
         while True:
-            # 【修复 1】补全 dest 和 curr 等关键参数
+            # 补全 dest 和 curr 等关键参数
             url = (f"https://www.wildberries.ru/__internal/catalog/sellers/v4/catalog?"
                    f"appType=1&curr=rub&dest=-1257786&sort=rate&spp=30"
                    f"&supplier={self.supplier_id}&page={page}")
@@ -176,16 +188,35 @@ class WBScraperService:
                 break
 
             print(f"📄 第 {page} 页: 捕获 {len(products)} 个商品")
-            for p in products:
-                if p.get('feedbacks', 0) == 0:
-                    no_fb_count += 1
-                else:
-                    no_fb_count = 0
 
-                if no_fb_count >= 20:
-                    print(f"🛑 触发终止条件：连续 {no_fb_count} 个无评分，停止扫描")
-                    return
-                self.process_group(p.get('id'))
+            # 🚀 优化：使用线程池并发处理当前页的所有商品组
+            from concurrent.futures import ThreadPoolExecutor, as_completed
+
+            # 这里控制外层并发数为 5。结合底层的并发，速度会非常快。
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                futures = []
+                for p in products:
+                    if p.get('feedbacks', 0) == 0:
+                        no_fb_count += 1
+                    else:
+                        no_fb_count = 0
+
+                    if no_fb_count >= 20:
+                        print(f"🛑 触发终止条件：连续 {no_fb_count} 个无评分，停止扫描")
+                        # ⚠️ 关键操作：触发终止时，取消线程池中还在排队的任务，然后直接结束方法
+                        executor.shutdown(wait=False, cancel_futures=True)
+                        return
+
+                    # 提交并发任务：处理当前商品组
+                    futures.append(executor.submit(self.process_group, p.get('id')))
+
+                # 阻塞等待：必须等当前页的所有商品（及其下属变体、图片）全部下完，再翻下一页
+                for future in as_completed(futures):
+                    try:
+                        future.result()
+                    except Exception as e:
+                        print(f"   ⚠️ 商品组处理异常: {e}")
+
             page += 1
 
     def run_product_list(self, product_ids):
@@ -220,9 +251,11 @@ class WBScraperService:
                     for pid, p_data in products_map.items():
                         fb = p_data.get('feedbacks', 0)
                         rate = p_data.get('reviewRating', 0)
-                        if fb >= self.min_feedbacks and rate >= self.min_rating:
+                        if self.min_feedbacks <= fb <= self.max_feedbacks and rate >= self.min_rating:
                             group_qualified = True
                             break
+
+
                 else:
                     group_qualified = True  # 宽容模式：获取不到详情时放行
 
@@ -381,9 +414,9 @@ class WBScraperService:
         if detail_data and detail_data.get('sizes'):
             price_rub = detail_data.get('sizes')[0].get('price', {}).get('product', 0) / 100
 
-        db = SessionLocal()
+
+
         try:
-            repo = WBProductRepository(db)
             product_dict = {
                 "supplier_id": card_data.get('selling', {}).get('supplier_id', self.supplier_id or 0),
                 "imt_id": card_data.get('imt_id'),
@@ -403,6 +436,9 @@ class WBScraperService:
                 "images_json": images_list,  # 需要 repository 和 entity 支持该字段
                 "video_path": video_rel_path  # 需要 repository 和 entity 支持该字段
             }
-            repo.save_product_and_sizes(product_dict, sizes_list)
-        finally:
-            db.close()
+            with SessionLocal() as db:
+                repo = SyncWBProductRepository(db)
+                repo.save_product_and_sizes(product_dict, sizes_list)
+        except Exception as e:
+            print(f"   ❌ 数据库保存失败: {e}")
+            raise

@@ -2,24 +2,29 @@ import time
 import random
 import requests
 import os
+from requests.adapters import HTTPAdapter
 
+# 1. 创建全局 Session 并配置连接池大小
+session = requests.Session()
+adapter = HTTPAdapter(pool_connections=100, pool_maxsize=200) # 根据你的并发数调大
+session.mount('http://', adapter)
+session.mount('https://', adapter)
 
 def request_with_retry(url: str, method: str = "GET", headers: dict = None, json_data: dict = None, retries: int = 3,
                        timeout: int = 15, stream: bool = False, **kwargs):
     """通用的带重试机制的请求工具"""
     for i in range(retries):
         try:
+            # 2. 将 requests 替换为 session
             if method.upper() == "GET":
-                r = requests.get(url, headers=headers, timeout=timeout, stream=stream, **kwargs)
+                r = session.get(url, headers=headers, timeout=timeout, stream=stream, **kwargs)
             else:
-                r = requests.request(method, url, headers=headers, json=json_data, timeout=timeout, stream=stream,
-                                     **kwargs)
+                r = session.request(method, url, headers=headers, json=json_data, timeout=timeout, stream=stream, **kwargs)
 
             if r.status_code in [200, 204]:
                 return r
             elif r.status_code == 404:
                 return None
-
             print(f"   ⚠️ 请求 {url} HTTP {r.status_code}，重试 ({i + 1}/{retries})...")
             time.sleep(random.uniform(1.5, 3))
         except Exception as e:
@@ -27,12 +32,12 @@ def request_with_retry(url: str, method: str = "GET", headers: dict = None, json
             time.sleep(random.uniform(2, 4))
     return None
 
-
 def download_file_with_retry(url: str, filepath: str, headers: dict = None, retries: int = 3):
     """通用的文件下载工具"""
     for _ in range(retries):
         try:
-            r = requests.get(url, headers=headers, stream=True, timeout=15)
+            # 3. 下载也替换为 session
+            r = session.get(url, headers=headers, stream=True, timeout=15)
             if r.status_code == 200:
                 with open(filepath, 'wb') as f:
                     for chunk in r.iter_content(1024):

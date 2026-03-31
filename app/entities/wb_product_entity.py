@@ -1,7 +1,10 @@
 from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey
 from sqlalchemy.orm import relationship
 from datetime import datetime
+
 from app.configs.database import Base
+
+
 
 class WBProductEntity(Base):
     __tablename__ = "wb_products"

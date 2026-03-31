@@ -2,10 +2,12 @@ import os
 import random
 import time
 import glob
+from pathlib import Path
+
 import requests
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from app.configs.settings import settings
-from app.configs.database import SessionLocal
+
+from app.core.database import AsyncSessionLocal, settings
 from app.repository.wb_product_repository import WBProductRepository
 from app.utils.http_client import request_with_retry
 from app.constants.wb_constants import CONTENT_API_URL
@@ -60,8 +62,13 @@ class WBUploaderService:
         return int(rub_price * rate * 1.1)
 
     def upload_images_concurrently(self, folder_rel_path, nm_id):
-        folder_path = os.path.join(settings.base_data_dir, folder_rel_path)
-        images = glob.glob(os.path.join(folder_path, "*.webp"))
+
+        folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
+        if not folder_path.exists() or not folder_path.is_dir():
+            print(f"⚠️ 找不到对应的本地文件夹: {folder_path}")
+            return
+        images = [str(p) for p in folder_path.glob("*.webp")]
+
         if not images: return
 
         url = f"{CONTENT_API_URL}/content/v3/media/file"
@@ -81,7 +88,7 @@ class WBUploaderService:
 
     def upload_video(self, folder_rel_path, nm_id):
         """新增：视频上传能力"""
-        folder_path = os.path.join(settings.base_data_dir, folder_rel_path)
+        folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
         videos = glob.glob(os.path.join(folder_path, "*.mp4")) + glob.glob(os.path.join(folder_path, "*.mov"))
         if not videos: return
 
@@ -114,30 +121,32 @@ class WBUploaderService:
         url = f"{self.discount_url}/api/v2/upload/task"
         request_with_retry(url, method="POST", headers=self.headers, json={"data": discount_payload})
 
-    def process_publish(self, original_nm_ids):
-        """核心：从数据库读取展平数据并分店铺刊登"""
-        db = SessionLocal()
-        repo = WBProductRepository(db)
-        try:
-            for nm_id in original_nm_ids:
-                if repo.is_published(nm_id, self.target_store): continue
+    async def process_publish(self, original_nm_ids):
 
-                product = repo.get_product_by_nm(nm_id)
-                if not product: continue
+        # 🌟 1. 使用 async with 自动管理连接的打开和关闭，告别 finally: db.close() 报错
+        async with AsyncSessionLocal() as db:
+            repo = WBProductRepository(db)
+
+            for nm_id in original_nm_ids:
+                if await repo.is_published(nm_id, self.target_store):
+                    continue
+
+                # 🌟 2. 必须加 await！获取商品数据
+                product = await repo.get_product_by_nm(nm_id)
+                if not product:
+                    continue
 
                 print(f"🚀 正在发布: {product.title} 到 {self.target_store}")
 
-                # TODO: 此处应包含 Payload 组装和 /content/v2/cards/upload 真实请求
                 # 假设 API 成功返回了全新的 new_nm_id
                 new_nm_id = nm_id + 88888
 
-                # 1. 上传图片
+                # 上传图片和视频（这里如果是通过 httpx 发送网络请求，其实也应该改成 await）
                 self.upload_images_concurrently(product.local_folder, new_nm_id)
-                # 2. 上传视频
                 self.upload_video(product.local_folder, new_nm_id)
 
-                # 3. 计算折扣和更新库存
-                sizes = repo.get_sizes_by_product_id(product.id)
+                # 🌟 3. 必须加 await！获取尺码数据（如果在 Repo 里这个方法也是异步的话）
+                sizes = await repo.get_sizes_by_product_id(product.id)
                 stocks_to_update = []
                 my_vendor_code = f"P-{nm_id}"
 
@@ -157,7 +166,8 @@ class WBUploaderService:
                     "discount": discount_rate
                 }])
 
-                repo.record_publish(nm_id, self.target_store, new_nm_id, my_vendor_code)
+                # 🌟 4. 必须加 await！记录刊登历史
+                await repo.record_publish(nm_id, self.target_store, new_nm_id, my_vendor_code)
 
                 # 4. 改名加 _已刊登 后缀
                 try:
@@ -166,6 +176,3 @@ class WBUploaderService:
                     os.rename(folder_path, new_path)
                 except Exception as e:
                     print(f"📁 文件夹重命名失败: {e}")
-
-        finally:
-            db.close()
