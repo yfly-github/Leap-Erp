@@ -79,70 +79,14 @@ class Settings(BaseSettings):
     # =========== 数据库 & Redis 配置结束 ==========
 
     # ========== 阿里云OSS配置开始 ==========
-    ALIYUN_OSS_ACCESS_KEY_ID: str = Field("LTAI5tMmyT1zpaFSuVpqJLFR", description="OSS访问密钥ID")
-    ALIYUN_OSS_ACCESS_KEY_SECRET: str = Field("VqwZMZrVjsJ2LLzhyLn2pNcti8OF4v", description="OSS访问密钥Secret")
-    ALIYUN_OSS_ENDPOINT: str = Field("oss-cn-hangzhou.aliyuncs.com", description="OSS端点")
-    ALIYUN_OSS_BUCKET_NAME: str = Field("lgkj-test", description="OSS存储桶名称")
+    ALIYUN_OSS_ACCESS_KEY_ID: str = Field("", description="OSS访问密钥ID")
+    ALIYUN_OSS_ACCESS_KEY_SECRET: str = Field("", description="OSS访问密钥Secret")
+    ALIYUN_OSS_ENDPOINT: str = Field("", description="OSS端点")
+    ALIYUN_OSS_BUCKET_NAME: str = Field("", description="OSS存储桶名称")
     ALIYUN_OSS_FOLDER_PATH: str = Field("infringement_library/", description="OSS文件夹路径")
     # ========== 阿里云OSS配置结束 ==========
 
-    # --- 🌍 ERP 回调配置 ---
-    LGKJ_ERP_DOMAIN: str = Field(default="http://121.40.177.65:8081", description="LGKJ ERP 域名")
-    LGKJ_ERP_AI_CALLBACK_URL: str = Field(default="amazon/selectionClaimProductPrompt/task/returnResult",description="兰谷ERP回调地址")
 
-    # Redis 队列键名配置
-    AI_TASK_QUEUE: str = "ai_factory:task:batch_jobs"
-    BATCH_JOBS_KEY: str = "ai_factory:batch_jobs"
-    PROMPT_TASK_QUEUE: str = Field(default="ai_factory:task:listing_prompt_tasks", description="提示词生成任务队列")
-    LISTING_TASK_QUEUE: str = Field(default="ai_factory:task:listing_tasks", description="listing生成任务队列")
-    DEAD_LETTER_QUEUE: str = Field(default="ai_factory:task:dead_letter_queue", description="AI任务死信队列")
-
-    # ====== 模型配置开始 ========
-    DEFAULT_TEXT_MODEL: str = Field(default="gemini-3.1-pro-preview", description="默认文本处理模型")
-    DEFAULT_IMAGE_MODEL: str = Field(default="gemini-3-pro-image-preview", description="默认图像/多模态处理模型")
-    WORKER_GLOBAL_RPM: int = Field(default=100, description="全局RPM")
-
-    # Gemini API 配置
-    GEMINI_API_KEYS_STR: str = Field(default="AIzaSyCTEt8F4IyWvlqN2SUxb-SOa_2bxPuzl9w")
-    GEMINI_BASE_URL: str = Field(default="https://generativelanguage.googleapis.com", description="Gemini API 端点")
-
-    # DeepSeek API 配置
-    DEEPSEEK_API_KEY: str = Field(default="", description="DeepSeek API Key")
-    DEEPSEEK_BASE_URL: str = Field(default="https://api.deepseek.ai", description="DeepSeek API 端点")
-
-    # --- 🤖 支持的模型列表 (核心配置) ---
-    SUPPORTED_MODELS: Dict[str, Dict[str, Any]] = {
-      "gemini-3.1-pro-preview": {
-        "name": "Gemini 3 Flash Preview",
-        "provider": "gemini",
-        "max_tokens": 8192,
-        "description": "Gemini 3 Flash Preview 模型"
-      },
-      "gemini-3.1-flash-image-preview": {
-        "provider": "gemini",
-        "task_type": "image",
-        "max_tokens": 8192
-      },
-      "gemini-3-pro-image-preview": {
-        "provider": "gemini",
-        "task_type": "image",
-        "max_tokens": 8192
-      },
-      "deepseek-chat": {
-        "provider": "deepseek",
-        "name": "DeepSeek V3",
-        "max_tokens": 4096
-      }
-    }
-
-    @property
-    def gemini_api_keys(self) -> list[str]:
-        """将逗号分隔的字符串解析为 Key 列表"""
-        if not self.GEMINI_API_KEYS_STR:
-            return []
-        return [k.strip() for k in self.GEMINI_API_KEYS_STR.split(',') if k.strip()]
-
-    # ==== 模型配置结束 ========
 
     #  Pydantic Settings 魔法配置：自动寻找并解析 .env 文件
     model_config = SettingsConfigDict(
