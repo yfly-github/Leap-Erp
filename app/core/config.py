@@ -79,11 +79,7 @@ class Settings(BaseSettings):
     # =========== 数据库 & Redis 配置结束 ==========
 
     # ========== 阿里云OSS配置开始 ==========
-    ALIYUN_OSS_ACCESS_KEY_ID: str = Field("", description="OSS访问密钥ID")
-    ALIYUN_OSS_ACCESS_KEY_SECRET: str = Field("", description="OSS访问密钥Secret")
-    ALIYUN_OSS_ENDPOINT: str = Field("", description="OSS端点")
-    ALIYUN_OSS_BUCKET_NAME: str = Field("", description="OSS存储桶名称")
-    ALIYUN_OSS_FOLDER_PATH: str = Field("infringement_library/", description="OSS文件夹路径")
+
     # ========== 阿里云OSS配置结束 ==========
 
 
