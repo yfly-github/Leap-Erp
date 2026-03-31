@@ -54,10 +54,6 @@ class Settings(BaseSettings):
 
     browser_path: str = Field(default=f"C:\Program Files\Google\Chrome\Application\chrome.exe", description="浏览器路径")
 
-    REDIS_HOST: str = Field(default="localhost", description="Redis主机")
-    REDIS_PORT: int = Field(default=6379, ge=1, le=65535, description="Redis端口")
-    REDIS_PASSWORD: str = Field(default="", description="Redis密码")
-    REDIS_DB: int = Field(default=0, description="Redis数据库")
 
     @computed_field
     @property
