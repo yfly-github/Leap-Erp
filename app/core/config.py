@@ -50,8 +50,6 @@ class Settings(BaseSettings):
     MYSQL_DB: str = Field(default="ai_factory", description="MySQL数据库名")
     MYSQL_CHARSET: str = Field(default="utf8mb4", description="MySQL字符集")
 
-    DATABASE_URL_SYNC: str = Field(default="mysql+pymysql://root:123456@127.0.0.1:3306/leap_erp?charset=utf8mb4", description="异步数据库连接串")
-
     base_data_dir: str = Field(default=str(BASE_PATH / "data"), description="数据存储目录")
 
     browser_path: str = Field(default=f"C:\Program Files\Google\Chrome\Application\chrome.exe", description="浏览器路径")
@@ -66,6 +64,15 @@ class Settings(BaseSettings):
     def DATABASE_URL_ASYNC(self) -> str:
         return (
             f"mysql+aiomysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
+            f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}"
+            f"?charset={self.MYSQL_CHARSET}"
+        )
+
+    @computed_field
+    @property
+    def DATABASE_URL_SYNC(self) -> str:
+        return (
+            f"mysql+pymysql://{self.MYSQL_USER}:{self.MYSQL_PASSWORD}"
             f"@{self.MYSQL_HOST}:{self.MYSQL_PORT}/{self.MYSQL_DB}"
             f"?charset={self.MYSQL_CHARSET}"
         )
