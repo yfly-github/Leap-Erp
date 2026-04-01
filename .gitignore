@@ -4,4 +4,5 @@ __pycache__/
 data/
 venv/
 .idea/
-.vscode/\n
+.vscode/
+logs/

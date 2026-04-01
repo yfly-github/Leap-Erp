@@ -1,5 +1,7 @@
 import os
-from app.configs.settings import settings
+
+from app.core.database import settings
+
 
 class MediaPathManager:
     @staticmethod
