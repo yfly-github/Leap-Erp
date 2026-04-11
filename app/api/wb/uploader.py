@@ -7,10 +7,10 @@ from app.utils.response import Response, ResponseModel
 router = APIRouter(prefix="/uploader", tags=["WB 刊登模块"])
 
 
-def run_publish_task(store: str, nm_ids: list):
+async def run_publish_task(store: str, nm_ids: list):
     try:
         uploader = WBUploaderService(target_store=store)
-        uploader.process_publish(nm_ids)
+        await uploader.process_publish(nm_ids)
     except Exception as e:
         print(f"❌ 刊登任务启动失败: {e}")
 

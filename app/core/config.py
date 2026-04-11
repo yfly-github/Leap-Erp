@@ -47,13 +47,22 @@ class Settings(BaseSettings):
     MYSQL_PORT: int = Field(default=3306, ge=1, le=65535, description="MySQL端口")
     MYSQL_USER: str = Field(default="root", description="MySQL用户名")
     MYSQL_PASSWORD: str = Field(default="", description="MySQL密码")
-    MYSQL_DB: str = Field(default="ai_factory", description="MySQL数据库名")
+    MYSQL_DB: str = Field(default="leap_erp", description="MySQL数据库名")
     MYSQL_CHARSET: str = Field(default="utf8mb4", description="MySQL字符集")
 
     base_data_dir: str = Field(default=str(BASE_PATH / "data"), description="数据存储目录")
 
     browser_path: str = Field(default=f"C:\Program Files\Google\Chrome\Application\chrome.exe", description="浏览器路径")
 
+    PROFIT_MARGIN: float = Field(default=0.95, description="商品售价利润率")
+
+    tokens_dict: Dict[str, str] = Field(
+        default={
+            "Store_A": "这里填入Store_A的真实Token",  # 你可以直接在这里写死用于测试
+            "测试店铺": "这里填入测试店铺的真实Token"
+        },
+        description="店铺名称与授权Token的映射"
+    )
 
     @computed_field
     @property

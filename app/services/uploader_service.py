@@ -1,7 +1,7 @@
 import os
 import random
-import time
 import glob
+import asyncio  # 🌟 新增：引入 asyncio 用于处理阻塞的线程调用
 from pathlib import Path
 
 import requests
@@ -17,7 +17,9 @@ class WBUploaderService:
     def __init__(self, target_store: str):
         self.target_store = target_store
         self.token = settings.tokens_dict.get(target_store)
-        if not self.token: raise ValueError(f"缺少店铺 {target_store} 的 Token")
+        if not self.token:
+            raise ValueError(f"缺少店铺 {target_store} 的 Token")
+
         self.headers = {
             "Authorization": self.token,
             "Content-Type": "application/json",
@@ -28,7 +30,7 @@ class WBUploaderService:
 
         # 尝试获取该店铺仓库ID
         self.warehouse_id = self.fetch_warehouse_id()
-        # 实时获取计算汇率
+        # 实时获取计算汇率 (依赖于 app/core/config.py 中补充的 profit_margin 字段)
         self.dynamic_rate = self.fetch_dynamic_rate(settings.profit_margin)
 
     def fetch_warehouse_id(self):
@@ -62,7 +64,6 @@ class WBUploaderService:
         return int(rub_price * rate * 1.1)
 
     def upload_images_concurrently(self, folder_rel_path, nm_id):
-
         folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
         if not folder_path.exists() or not folder_path.is_dir():
             print(f"⚠️ 找不到对应的本地文件夹: {folder_path}")
@@ -79,8 +80,12 @@ class WBUploaderService:
             hdrs.pop("Content-Type", None)
             hdrs.update({"X-Nm-Id": str(nm_id), "X-Photo-Number": str(idx)})
             with open(img_path, 'rb') as f:
-                request_with_retry(url, method="POST", headers=hdrs,
-                                   files={'uploadfile': (os.path.basename(img_path), f, "image/webp")})
+                request_with_retry(
+                    url,
+                    method="POST",
+                    headers=hdrs,
+                    files={'uploadfile': (os.path.basename(img_path), f, "image/webp")}
+                )
 
         with ThreadPoolExecutor(max_workers=5) as executor:
             futures = [executor.submit(_upload, img, i + 1) for i, img in enumerate(images)]
@@ -107,7 +112,12 @@ class WBUploaderService:
         print(f"🎬 正在上传视频 -> {nm_id}")
 
         with open(video_path, 'rb') as f:
-            request_with_retry(url, method="POST", headers=hdrs, files={'uploadfile': (filename, f, mime_type)})
+            request_with_retry(
+                url,
+                method="POST",
+                headers=hdrs,
+                files={'uploadfile': (filename, f, mime_type)}
+            )
 
     def update_stocks(self, stocks_list):
         """新增：更新库存 API"""
@@ -122,7 +132,6 @@ class WBUploaderService:
         request_with_retry(url, method="POST", headers=self.headers, json={"data": discount_payload})
 
     async def process_publish(self, original_nm_ids):
-
         # 🌟 1. 使用 async with 自动管理连接的打开和关闭，告别 finally: db.close() 报错
         async with AsyncSessionLocal() as db:
             repo = WBProductRepository(db)
@@ -141,11 +150,11 @@ class WBUploaderService:
                 # 假设 API 成功返回了全新的 new_nm_id
                 new_nm_id = nm_id + 88888
 
-                # 上传图片和视频（这里如果是通过 httpx 发送网络请求，其实也应该改成 await）
-                self.upload_images_concurrently(product.local_folder, new_nm_id)
-                self.upload_video(product.local_folder, new_nm_id)
+                # 🌟 核心优化：使用 asyncio.to_thread 包裹同步请求，防止阻塞主事件循环
+                await asyncio.to_thread(self.upload_images_concurrently, product.local_folder, new_nm_id)
+                await asyncio.to_thread(self.upload_video, product.local_folder, new_nm_id)
 
-                # 🌟 3. 必须加 await！获取尺码数据（如果在 Repo 里这个方法也是异步的话）
+                # 🌟 3. 必须加 await！获取尺码数据
                 sizes = await repo.get_sizes_by_product_id(product.id)
                 stocks_to_update = []
                 my_vendor_code = f"P-{nm_id}"
@@ -154,22 +163,27 @@ class WBUploaderService:
                     sku = f"{my_vendor_code}-{s.tech_size}"
                     stocks_to_update.append({"sku": sku, "amount": s.stock_qty})
 
-                self.update_stocks(stocks_to_update)
+                # 🌟 同步请求交由线程池执行
+                await asyncio.to_thread(self.update_stocks, stocks_to_update)
 
                 # 计算折扣策略
                 fake_price = self._calc_price(product.price_rub)
                 discount_rate = random.randint(40, 70)
 
-                self.set_discounts([{
-                    "nmID": new_nm_id,
-                    "price": fake_price,
-                    "discount": discount_rate
-                }])
+                # 🌟 同步请求交由线程池执行
+                await asyncio.to_thread(
+                    self.set_discounts,
+                    [{
+                        "nmID": new_nm_id,
+                        "price": fake_price,
+                        "discount": discount_rate
+                    }]
+                )
 
                 # 🌟 4. 必须加 await！记录刊登历史
                 await repo.record_publish(nm_id, self.target_store, new_nm_id, my_vendor_code)
 
-                # 4. 改名加 _已刊登 后缀
+                # 5. 改名加 _已刊登 后缀
                 try:
                     folder_path = os.path.join(settings.base_data_dir, product.local_folder)
                     new_path = f"{folder_path}_已刊登"
