@@ -2,6 +2,7 @@
 from app.configs.database import engine, Base
 # 必须显式导入所有实体模型，这样 Base 才能“看到”它们
 from app.entities.wb_product_entity import WBProductEntity, WBProductSizeEntity, WBPublishRecordEntity
+from app.entities.wb_store_entity import WBStoreEntity
 
 def create_tables():
     print("⏳ 正在检查并创建数据库表...")
