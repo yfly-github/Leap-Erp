@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey
+from sqlalchemy import Column, Integer, String, Float, DateTime, Boolean, JSON, ForeignKey, Text
 from sqlalchemy.orm import relationship
 from datetime import datetime
 
@@ -15,6 +15,7 @@ class WBProductEntity(Base):
 
     title = Column(String(255), comment="商品标题")
     brand = Column(String(100), comment="品牌")
+    description = Column(Text, comment="商品描述")
 
     subject_id = Column(Integer, default=0, comment="WB内部类目(Subject)ID")
     category = Column(String(100), comment="类目")
