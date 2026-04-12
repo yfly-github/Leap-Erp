@@ -14,7 +14,7 @@ class WBStoreRepository:
         """
         stmt = select(WBStoreEntity).filter_by(
             store_name=store_name,
-            is_active=True  # 确保只查询未被禁用的店铺
+            status=True  # 确保只查询未被禁用的店铺
         )
         result = await self.db.execute(stmt)
         store = result.scalar_one_or_none()

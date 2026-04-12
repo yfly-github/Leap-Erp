@@ -15,7 +15,10 @@ class WBProductEntity(Base):
 
     title = Column(String(255), comment="商品标题")
     brand = Column(String(100), comment="品牌")
+
+    subject_id = Column(Integer, default=0, comment="WB内部类目(Subject)ID")
     category = Column(String(100), comment="类目")
+
     main_image = Column(String(500), comment="主图")
     images_json = Column(JSON, comment="所有附图的相对路径列表")
     video_path = Column(String(255), comment="视频文件的相对路径")

@@ -414,8 +414,6 @@ class WBScraperService:
         if detail_data and detail_data.get('sizes'):
             price_rub = detail_data.get('sizes')[0].get('price', {}).get('product', 0) / 100
 
-
-
         try:
             product_dict = {
                 "supplier_id": card_data.get('selling', {}).get('supplier_id', self.supplier_id or 0),
@@ -423,6 +421,7 @@ class WBScraperService:
                 "nm_id": product_id,
                 "title": card_data.get('imt_name', ''),
                 "brand": card_data.get('selling', {}).get('brand_name', ''),
+                "subject_id": detail_data.get("subjectId", 0),
                 "category": card_data.get('subj_name', ''),
                 "price_rub": price_rub,
                 "feedbacks": detail_data.get('feedbacks', 0) if detail_data else 0,
