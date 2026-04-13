@@ -74,3 +74,56 @@ class WBProductRepository:
 
         # 3. 提取单条数据，如果找不到则返回 None
         return result.scalar_one_or_none()
+
+    async def upsert_scraped_product(
+            self,
+            nm_id: int,
+            title: str,
+            brand: str,
+            description:str,
+            subject_id: int,
+            price_rub: float,
+            local_folder: str,
+            attributes_json: str
+    ):
+        """
+        🚀 插入或更新爬取到的商品数据 (Upsert)
+        """
+        try:
+            # 1. 先查询数据库中是否已经存在该 nm_id
+            stmt = select(WBProductEntity).where(WBProductEntity.nm_id == nm_id)
+            result = await self.db.execute(stmt)
+            product = result.scalars().first()
+
+            if product:
+                # 2A. 如果存在，更新数据
+                product.title = title
+                product.brand = brand
+                product.subject_id = subject_id  # 🌟 关键的建品类目ID
+                product.price_rub = price_rub
+                product.local_folder = local_folder
+                product.attributes_json = attributes_json
+                product.is_scraped = True
+            else:
+                # 2B. 如果不存在，创建新记录
+                product = WBProductEntity(
+                    nm_id=nm_id,
+                    title=title,
+                    brand=brand,
+                    subject_id=subject_id,  # 🌟 关键的建品类目ID
+                    price_rub=price_rub,
+                    local_folder=local_folder,
+                    attributes_json=attributes_json,
+                    is_scraped=True
+                )
+                self.db.add(product)
+
+            # 3. 提交事务
+            await self.db.commit()
+            return product
+
+        except Exception as e:
+            # 遇到异常时回滚，防止数据库连接池死锁
+            await self.db_session.rollback()
+            print(f"❌ 数据库 Upsert 失败 (nm_id: {nm_id}): {e}")
+            raise e

@@ -1,5 +1,7 @@
 import requests
-from app.configs.settings import settings
+
+from app.core.database import settings
+
 
 class PricingService:
     def __init__(self):
@@ -12,7 +14,7 @@ class PricingService:
             resp = requests.get(url, timeout=10)
             if resp.status_code == 200:
                 cny_value = resp.json()['Valute']['CNY']['Value']
-                return (1 / cny_value) * settings.profit_margin
+                return (1 / cny_value) * settings.PROFIT_MARGIN
         except Exception:
             pass
         return 0.086  # 兜底汇率
