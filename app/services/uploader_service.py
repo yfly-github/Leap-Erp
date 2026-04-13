@@ -5,6 +5,7 @@ import glob
 import asyncio
 import json
 import time
+import re
 from pathlib import Path
 
 import requests
@@ -64,11 +65,50 @@ class WBUploaderService:
             return int(rub_price * rate * 1.2)
         return int(rub_price * rate * 1.1)
 
-    def create_wb_card(self, product) -> bool:
+    def _extract_dimensions(self, raw_attrs) -> dict:
         """
-        🌟 核心方法：提交建品任务 (返回布尔值，不再返回假的 nmID)
+        🌟 智能提取真实的包装尺寸，防止硬编码导致物流费亏损
+        """
+        dims = {"length": 10, "width": 10, "height": 10}
+
+        if not raw_attrs:
+            return dims
+
+        try:
+            attrs_dict = {}
+            if isinstance(raw_attrs, str):
+                attrs_dict = json.loads(raw_attrs)
+            elif isinstance(raw_attrs, dict):
+                attrs_dict = raw_attrs
+            elif isinstance(raw_attrs, list):
+                attrs_dict = {item['name']: item['value'] for item in raw_attrs if 'name' in item}
+
+            key_map = {
+                "длина упаковки": "length",
+                "ширина упаковки": "width",
+                "высота упаковки": "height"
+            }
+
+            for k, v in attrs_dict.items():
+                k_lower = str(k).lower()
+                for ru_key, en_key in key_map.items():
+                    if ru_key in k_lower:
+                        match = re.search(r'\d+', str(v))
+                        if match:
+                            extracted_val = int(match.group())
+                            if extracted_val > 0:
+                                dims[en_key] = extracted_val
+        except Exception as e:
+            print(f"⚠️ 解析包装尺寸时发生异常: {e}，将使用默认尺寸")
+
+        return dims
+
+    def create_wb_card(self, product, sizes) -> bool:
+        """
+        🌟 核心建品方法：动态注入尺寸、描述与 SKU 条码
         """
         url = "https://content-api.wildberries.ru/content/v2/cards/upload"
+        vendor_code = f"P-{product.nm_id}"
 
         characteristics = []
         try:
@@ -82,15 +122,33 @@ class WBUploaderService:
         except Exception as e:
             print(f"⚠️ 属性解析失败: {e}")
 
+        # 🌟 组装尺码数据，预先向 WB 注册我们自定义的 SKU 条码
+        sizes_payload = []
+        for s in sizes:
+            sizes_payload.append({
+                "techSize": str(s.tech_size),
+                "wbSize": "",
+                "price": self._calc_price(product.price_rub),
+                "skus": [f"{vendor_code}-{s.tech_size}"]
+            })
+
+        # 安全兜底：如果没有获取到尺码（或商品原本就没有尺码），默认生成一个 "0" 尺码
+        if not sizes_payload:
+            sizes_payload = [{"techSize": "0", "wbSize": "", "price": 9999, "skus": [f"{vendor_code}-0"]}]
+
+        # 提取真实长宽高
+        real_dimensions = self._extract_dimensions(product.attributes_json)
+
         payload = [{
-            "subjectID": product.subject_id,
+            "subjectID": product.subject_id,  # 动态类目
             "variants": [{
-                "vendorCode": f"P-{product.nm_id}",
+                "vendorCode": vendor_code,
                 "title": product.title,
-                "description": product.title,
+                "description": product.description or product.title,  # 使用真实描述
                 "brand": product.brand or "Нет бренда",
-                "dimensions": {"length": 10, "width": 10, "height": 10},
-                "characteristics": characteristics
+                "dimensions": real_dimensions,
+                "characteristics": characteristics,
+                "sizes": sizes_payload
             }]
         }]
 
@@ -112,43 +170,6 @@ class WBUploaderService:
 
         return False
 
-    def _wait_for_real_nm_id(self, vendor_code: str, max_retries: int = 15, delay: int = 10):
-        """
-        🌟 轮询查询接口：等待 WB 后台分配真实的 nmID
-        """
-        url = "https://content-api.wildberries.ru/content/v2/get/cards/list"
-
-        # 🚀 修复点 1：使用 vendorCodes 精确匹配，避开 textSearch 的索引延迟
-        payload = {
-            "settings": {
-                "cursor": {"limit": 10},
-                "filter": {
-                    "withError": False,
-                    "vendorCodes": [vendor_code]  # 把 textSearch 换成了 vendorCodes 数组
-                }
-            }
-        }
-
-        print(f"⏳ 正在等待 WB 生成真实的 nmID (条码: {vendor_code})...")
-
-        # 🚀 修复点 2：增加了默认重试次数 (15 * 10 = 等待 150 秒)，防止 WB 偶尔处理缓慢
-        for i in range(max_retries):
-            time.sleep(delay)
-            print(f"   🔄 第 {i + 1}/{max_retries} 次查询...")
-            try:
-                resp = requests.post(url, headers=self.headers, json=payload, timeout=15)
-                if resp.status_code == 200:
-                    cards = resp.json().get("cards", [])
-                    if cards:
-                        real_nm_id = cards[0].get("nmID")
-                        print(f"🎉 成功获取到 WB 真实 nmID: {real_nm_id}")
-                        return real_nm_id
-            except Exception as e:
-                print(f"   ⚠️ 查询出错: {e}")
-
-        print("❌ 等待超时，WB 尚未生成 nmID，请稍后再试。")
-        return None
-
     def upload_images_concurrently(self, folder_rel_path, nm_id):
         folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
         if not folder_path.exists() or not folder_path.is_dir():
@@ -159,7 +180,6 @@ class WBUploaderService:
         url = f"{CONTENT_API_URL}/content/v3/media/file"
 
         def _upload(img_path, idx):
-            # 🌟 拦截并过滤大小为 0 的损坏图片
             if os.path.getsize(img_path) == 0:
                 print(f"⚠️ 图片 {os.path.basename(img_path)} 大小为 0 字节，已跳过！")
                 return
@@ -174,12 +194,14 @@ class WBUploaderService:
                     files={'uploadfile': (os.path.basename(img_path), f, "image/webp")}
                 )
 
-        # 建议并发数设为 1 或 2，防止触发 429 频率限制
         with ThreadPoolExecutor(max_workers=2) as executor:
             futures = [executor.submit(_upload, img, i + 1) for i, img in enumerate(images)]
             for _ in as_completed(futures): pass
 
     def upload_video(self, folder_rel_path, nm_id):
+        """
+        🌟 修复后的视频上传：移除干扰参数，精准识别格式
+        """
         folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
         videos = glob.glob(os.path.join(folder_path, "*.mp4")) + glob.glob(os.path.join(folder_path, "*.mov"))
         if not videos: return
@@ -187,7 +209,6 @@ class WBUploaderService:
         video_path = videos[0]
         filename = os.path.basename(video_path)
 
-        # 🌟 拦截并过滤大小为 0 的损坏视频，或过大的视频
         size_mb = os.path.getsize(video_path) / (1024 * 1024)
         if size_mb == 0:
             print(f"⚠️ 视频 {filename} 大小为 0 字节，跳过")
@@ -199,7 +220,9 @@ class WBUploaderService:
         url = f"{CONTENT_API_URL}/content/v3/media/file"
         hdrs = self.headers.copy()
         hdrs.pop("Content-Type", None)
-        hdrs.update({"X-Nm-Id": str(nm_id), "X-Photo-Number": "1"})
+
+        # 绝不传递 X-Photo-Number
+        hdrs.update({"X-Nm-Id": str(nm_id)})
 
         mime_type = "video/quicktime" if filename.lower().endswith(".mov") else "video/mp4"
         with open(video_path, 'rb') as f:
@@ -219,28 +242,30 @@ class WBUploaderService:
         request_with_retry(url, method="POST", headers=self.headers, json={"data": discount_payload})
 
     async def process_publish(self, original_nm_ids, db_session: AsyncSession):
+        """
+        🌟 高性能批处理核心调度流
+        """
         repo = WBProductRepository(db_session)
 
         # ==========================================
         # 阶段 1：无阻塞批量提交建品任务
         # ==========================================
-        pending_products = {}  # 记录成功提交等待分配 nmID 的商品字典 {vendor_code: product}
+        pending_products = {}
 
         print(f"\n🚀 [阶段 1] 开始批量提交 {len(original_nm_ids)} 个商品的建品请求...")
         for nm_id in original_nm_ids:
-            # 1. 检查是否已经刊登过
             if await repo.is_published(nm_id, self.target_store):
                 print(f"⏭️ 商品 {nm_id} 已在该店铺刊登，自动跳过")
                 continue
 
-            # 2. 查询商品数据
             product = await repo.get_product_by_nm(nm_id)
             if not product: continue
 
-            print(f"   ▶️ 正在提交: {product.title} (原始ID: {nm_id})")
+            # 获取并传入 sizes
+            sizes = await repo.get_sizes_by_product_id(product.id)
 
-            # 3. 提交建品请求
-            is_submitted = await asyncio.to_thread(self.create_wb_card, product)
+            print(f"   ▶️ 正在提交: {product.title} (原始ID: {nm_id})")
+            is_submitted = await asyncio.to_thread(self.create_wb_card, product, sizes)
 
             if is_submitted:
                 vendor_code = f"P-{product.nm_id}"
@@ -248,7 +273,6 @@ class WBUploaderService:
             else:
                 print(f"   ❌ 商品 {nm_id} 建品请求失败")
 
-            # 短暂休息 1 秒，防止短时间内高频发包触发 WB API 429 限制
             await asyncio.sleep(1)
 
         if not pending_products:
@@ -259,19 +283,17 @@ class WBUploaderService:
         # 阶段 2：统一批量轮询真实的 nmID
         # ==========================================
         print(f"\n⏳ [阶段 2] 开始为 {len(pending_products)} 个商品批量查询真实 nmID...")
-        real_nm_ids_map = {}  # 存储获取到的 {vendor_code: real_nm_id}
+        real_nm_ids_map = {}
 
         url = "https://content-api.wildberries.ru/content/v2/get/cards/list"
-        max_retries = 12  # 12 次 * 15秒 = 最多等待 3 分钟
+        max_retries = 12
 
         for i in range(max_retries):
-            # 筛选出还没查到 nmID 的条码
             unresolved_codes = [vc for vc in pending_products.keys() if vc not in real_nm_ids_map]
             if not unresolved_codes:
                 print("   🎉 所有商品的 nmID 已全部获取完毕！")
-                break  # 提前结束轮询
+                break
 
-            # 构造批量查询的 payload，使用 vendorCodes 数组精确匹配
             payload = {
                 "settings": {
                     "cursor": {"limit": 100},
@@ -285,20 +307,17 @@ class WBUploaderService:
             print(f"   🔄 第 {i + 1}/{max_retries} 次批量查询 (剩余 {len(unresolved_codes)} 个待分配)...")
 
             try:
-                # 因为 requests 是同步库，所以依然用 to_thread 包装防止阻塞主线程
                 resp = await asyncio.to_thread(requests.post, url, headers=self.headers, json=payload, timeout=20)
                 if resp.status_code == 200:
                     cards = resp.json().get("cards", [])
                     for card in cards:
                         vc = card.get("vendorCode")
-                        # 确保查回来的 code 在我们的等待列表里
                         if vc in pending_products and vc not in real_nm_ids_map:
                             real_nm_ids_map[vc] = card.get("nmID")
                             print(f"   ✅ 成功获取到 {vc} 的专属 nmID: {real_nm_ids_map[vc]}")
             except Exception as e:
                 print(f"   ⚠️ 批量查询出错: {e}")
 
-            # 如果还没全查到，等待 15 秒后再发起下一轮批量查询
             if len(real_nm_ids_map) < len(pending_products):
                 await asyncio.sleep(15)
 
@@ -311,14 +330,13 @@ class WBUploaderService:
             product = pending_products[vendor_code]
             print(f"   ⚙️ 正在处理: {vendor_code} (目标 nmID: {real_new_nm_id})")
 
-            # 准备库存和价格数据
             sizes = await repo.get_sizes_by_product_id(product.id)
             stocks_to_update = [{"sku": f"{vendor_code}-{s.tech_size}", "amount": s.stock_qty} for s in sizes]
             fake_price = self._calc_price(product.price_rub)
             discount_payload = [{"nmID": real_new_nm_id, "price": fake_price, "discount": random.randint(40, 70)}]
 
             try:
-                # 🌟 核心并发区：同时发起传图、传视频、同步库存、改价格的网络请求
+                # 核心并发网路请求
                 await asyncio.gather(
                     asyncio.to_thread(self.upload_images_concurrently, product.local_folder, real_new_nm_id),
                     asyncio.to_thread(self.upload_video, product.local_folder, real_new_nm_id),
@@ -326,10 +344,9 @@ class WBUploaderService:
                     asyncio.to_thread(self.set_discounts, discount_payload)
                 )
 
-                # 更新数据库记录
                 await repo.record_publish(product.nm_id, self.target_store, real_new_nm_id, vendor_code)
 
-                # 重命名本地文件夹，标记为已刊登
+                # 重命名本地文件夹
                 old_path = os.path.join(settings.base_data_dir, product.local_folder)
                 new_path = f"{old_path}_已刊登"
                 if os.path.exists(old_path) and not os.path.exists(new_path):
@@ -339,7 +356,6 @@ class WBUploaderService:
             except Exception as e:
                 print(f"   ❌ 商品 {vendor_code} 物料同步发生异常: {e}\n")
 
-            # 每个商品处理完后缓冲 2 秒，保护下游系统
             await asyncio.sleep(2)
 
         print("🏁 本批次刊登任务全部结束。")
