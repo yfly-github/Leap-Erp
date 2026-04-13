@@ -83,7 +83,7 @@ class WBUploaderService:
             print(f"⚠️ 属性解析失败: {e}")
 
         payload = [{
-            "subjectID": 444,  # ⚠️ 记得以后改成 product.subject_id
+            "subjectID": product.subject_id,
             "variants": [{
                 "vendorCode": f"P-{product.nm_id}",
                 "title": product.title,
@@ -112,23 +112,26 @@ class WBUploaderService:
 
         return False
 
-    def _wait_for_real_nm_id(self, vendor_code: str, max_retries: int = 6, delay: int = 10):
+    def _wait_for_real_nm_id(self, vendor_code: str, max_retries: int = 15, delay: int = 10):
         """
         🌟 轮询查询接口：等待 WB 后台分配真实的 nmID
         """
         url = "https://content-api.wildberries.ru/content/v2/get/cards/list"
+
+        # 🚀 修复点 1：使用 vendorCodes 精确匹配，避开 textSearch 的索引延迟
         payload = {
             "settings": {
                 "cursor": {"limit": 10},
                 "filter": {
                     "withError": False,
-                    "textSearch": vendor_code
+                    "vendorCodes": [vendor_code]  # 把 textSearch 换成了 vendorCodes 数组
                 }
             }
         }
 
         print(f"⏳ 正在等待 WB 生成真实的 nmID (条码: {vendor_code})...")
 
+        # 🚀 修复点 2：增加了默认重试次数 (15 * 10 = 等待 150 秒)，防止 WB 偶尔处理缓慢
         for i in range(max_retries):
             time.sleep(delay)
             print(f"   🔄 第 {i + 1}/{max_retries} 次查询...")
@@ -218,55 +221,125 @@ class WBUploaderService:
     async def process_publish(self, original_nm_ids, db_session: AsyncSession):
         repo = WBProductRepository(db_session)
 
+        # ==========================================
+        # 阶段 1：无阻塞批量提交建品任务
+        # ==========================================
+        pending_products = {}  # 记录成功提交等待分配 nmID 的商品字典 {vendor_code: product}
+
+        print(f"\n🚀 [阶段 1] 开始批量提交 {len(original_nm_ids)} 个商品的建品请求...")
         for nm_id in original_nm_ids:
+            # 1. 检查是否已经刊登过
             if await repo.is_published(nm_id, self.target_store):
+                print(f"⏭️ 商品 {nm_id} 已在该店铺刊登，自动跳过")
                 continue
 
+            # 2. 查询商品数据
             product = await repo.get_product_by_nm(nm_id)
             if not product: continue
 
-            print(f"\n🚀 =======================================")
-            print(f"🚀 开始处理商品: {product.title}")
+            print(f"   ▶️ 正在提交: {product.title} (原始ID: {nm_id})")
 
-            # 1. 提交建品请求
+            # 3. 提交建品请求
             is_submitted = await asyncio.to_thread(self.create_wb_card, product)
-            if not is_submitted:
-                print(f"⏭️ 建品提交失败，跳过该商品")
-                continue
 
-                # 2. 🌟 轮询获取专属的真实 nmID
-            vendor_code = f"P-{product.nm_id}"
-            real_new_nm_id = await asyncio.to_thread(self._wait_for_real_nm_id, vendor_code)
+            if is_submitted:
+                vendor_code = f"P-{product.nm_id}"
+                pending_products[vendor_code] = product
+            else:
+                print(f"   ❌ 商品 {nm_id} 建品请求失败")
 
-            if not real_new_nm_id:
-                print("⏭️ 未能获取到新 nmID，跳过传图和改价环节")
-                continue
+            # 短暂休息 1 秒，防止短时间内高频发包触发 WB API 429 限制
+            await asyncio.sleep(1)
 
-            # 3. 拿到真实 ID 后，并发上传过滤后的媒体文件
-            print(f"📸 准备向真实 ID [{real_new_nm_id}] 上传媒体文件...")
-            await asyncio.to_thread(self.upload_images_concurrently, product.local_folder, real_new_nm_id)
-            await asyncio.to_thread(self.upload_video, product.local_folder, real_new_nm_id)
+        if not pending_products:
+            print("✅ 所有建品已提交完毕，暂无需要等待分配 nmID 的新商品。")
+            return
 
-            # 4. 同步库存与价格 (使用真实的 real_new_nm_id)
-            sizes = await repo.get_sizes_by_product_id(product.id)
-            stocks_to_update = [{"sku": f"{vendor_code}-{s.tech_size}", "amount": s.stock_qty} for s in sizes]
-            await asyncio.to_thread(self.update_stocks, stocks_to_update)
+        # ==========================================
+        # 阶段 2：统一批量轮询真实的 nmID
+        # ==========================================
+        print(f"\n⏳ [阶段 2] 开始为 {len(pending_products)} 个商品批量查询真实 nmID...")
+        real_nm_ids_map = {}  # 存储获取到的 {vendor_code: real_nm_id}
 
-            fake_price = self._calc_price(product.price_rub)
-            await asyncio.to_thread(
-                self.set_discounts,
-                [{"nmID": real_new_nm_id, "price": fake_price, "discount": random.randint(40, 70)}]
-            )
+        url = "https://content-api.wildberries.ru/content/v2/get/cards/list"
+        max_retries = 12  # 12 次 * 15秒 = 最多等待 3 分钟
 
-            # 5. 更新状态与本地目录
-            await repo.record_publish(nm_id, self.target_store, real_new_nm_id, vendor_code)
+        for i in range(max_retries):
+            # 筛选出还没查到 nmID 的条码
+            unresolved_codes = [vc for vc in pending_products.keys() if vc not in real_nm_ids_map]
+            if not unresolved_codes:
+                print("   🎉 所有商品的 nmID 已全部获取完毕！")
+                break  # 提前结束轮询
+
+            # 构造批量查询的 payload，使用 vendorCodes 数组精确匹配
+            payload = {
+                "settings": {
+                    "cursor": {"limit": 100},
+                    "filter": {
+                        "withError": False,
+                        "vendorCodes": unresolved_codes
+                    }
+                }
+            }
+
+            print(f"   🔄 第 {i + 1}/{max_retries} 次批量查询 (剩余 {len(unresolved_codes)} 个待分配)...")
 
             try:
-                os.rename(os.path.join(settings.base_data_dir, product.local_folder),
-                          os.path.join(settings.base_data_dir, f"{product.local_folder}_已刊登"))
-            except:
-                pass
+                # 因为 requests 是同步库，所以依然用 to_thread 包装防止阻塞主线程
+                resp = await asyncio.to_thread(requests.post, url, headers=self.headers, json=payload, timeout=20)
+                if resp.status_code == 200:
+                    cards = resp.json().get("cards", [])
+                    for card in cards:
+                        vc = card.get("vendorCode")
+                        # 确保查回来的 code 在我们的等待列表里
+                        if vc in pending_products and vc not in real_nm_ids_map:
+                            real_nm_ids_map[vc] = card.get("nmID")
+                            print(f"   ✅ 成功获取到 {vc} 的专属 nmID: {real_nm_ids_map[vc]}")
+            except Exception as e:
+                print(f"   ⚠️ 批量查询出错: {e}")
 
-            # 🌟 为了防止 WB API 频率限制 (HTTP 429)，处理完一个商品后强制休息 5 秒
-            print(f"🎉 商品 {product.nm_id} 刊登任务完成，休息 5s...\n")
-            await asyncio.sleep(5)
+            # 如果还没全查到，等待 15 秒后再发起下一轮批量查询
+            if len(real_nm_ids_map) < len(pending_products):
+                await asyncio.sleep(15)
+
+                # ==========================================
+        # 阶段 3：并发上传素材、改价、改库存并更新数据库
+        # ==========================================
+        print(f"\n📸 [阶段 3] 开始为成功获取 nmID 的 {len(real_nm_ids_map)} 个商品同步物料...")
+
+        for vendor_code, real_new_nm_id in real_nm_ids_map.items():
+            product = pending_products[vendor_code]
+            print(f"   ⚙️ 正在处理: {vendor_code} (目标 nmID: {real_new_nm_id})")
+
+            # 准备库存和价格数据
+            sizes = await repo.get_sizes_by_product_id(product.id)
+            stocks_to_update = [{"sku": f"{vendor_code}-{s.tech_size}", "amount": s.stock_qty} for s in sizes]
+            fake_price = self._calc_price(product.price_rub)
+            discount_payload = [{"nmID": real_new_nm_id, "price": fake_price, "discount": random.randint(40, 70)}]
+
+            try:
+                # 🌟 核心并发区：同时发起传图、传视频、同步库存、改价格的网络请求
+                await asyncio.gather(
+                    asyncio.to_thread(self.upload_images_concurrently, product.local_folder, real_new_nm_id),
+                    asyncio.to_thread(self.upload_video, product.local_folder, real_new_nm_id),
+                    asyncio.to_thread(self.update_stocks, stocks_to_update),
+                    asyncio.to_thread(self.set_discounts, discount_payload)
+                )
+
+                # 更新数据库记录
+                await repo.record_publish(product.nm_id, self.target_store, real_new_nm_id, vendor_code)
+
+                # 重命名本地文件夹，标记为已刊登
+                old_path = os.path.join(settings.base_data_dir, product.local_folder)
+                new_path = f"{old_path}_已刊登"
+                if os.path.exists(old_path) and not os.path.exists(new_path):
+                    os.rename(old_path, new_path)
+
+                print(f"   🎉 商品 {vendor_code} 全流程上架完成！\n")
+            except Exception as e:
+                print(f"   ❌ 商品 {vendor_code} 物料同步发生异常: {e}\n")
+
+            # 每个商品处理完后缓冲 2 秒，保护下游系统
+            await asyncio.sleep(2)
+
+        print("🏁 本批次刊登任务全部结束。")
