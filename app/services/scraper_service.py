@@ -411,6 +411,7 @@ class WBScraperService:
                 "nm_id": product_id,
                 "title": card_data.get('imt_name', ''),
                 "brand": card_data.get('selling', {}).get('brand_name', ''),
+                "description": card_data.get('description', ''),
                 "subject_id": detail_data.get("subjectId", 0),  # 完美提取
                 "category": card_data.get('subj_name', ''),
                 "price_rub": price_rub,

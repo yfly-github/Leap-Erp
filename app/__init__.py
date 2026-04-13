@@ -29,7 +29,7 @@ def create_app(settings: Optional[Settings] = None) -> FastAPI:
     async def lifespan(app: FastAPI):
         logger.info("🚀 正在初始化基础设施...")
 
-        # 2. 初始化 MySQL
+        # 1. 初始化 MySQL
         try:
             if await ping_database():
                 logger.info("✅ MySQL 连接池初始化成功")
