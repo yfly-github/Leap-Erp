@@ -108,7 +108,7 @@ class WBUploaderService:
         🌟 核心建品方法：动态注入尺寸、描述与 SKU 条码
         """
         url = "https://content-api.wildberries.ru/content/v2/cards/upload"
-        vendor_code = f"P-{product.nm_id}"
+        vendor_code = f"SKU-{product.nm_id}"
 
         characteristics = []
         try:
@@ -268,7 +268,7 @@ class WBUploaderService:
             is_submitted = await asyncio.to_thread(self.create_wb_card, product, sizes)
 
             if is_submitted:
-                vendor_code = f"P-{product.nm_id}"
+                vendor_code = f"SKU-{product.nm_id}"
                 pending_products[vendor_code] = product
             else:
                 print(f"   ❌ 商品 {nm_id} 建品请求失败")
