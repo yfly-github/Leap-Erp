@@ -6,6 +6,8 @@ import asyncio
 import json
 import time
 import re
+import shutil
+import datetime
 from pathlib import Path
 
 import requests
@@ -65,23 +67,73 @@ class WBUploaderService:
             return int(rub_price * rate * 1.2)
         return int(rub_price * rate * 1.1)
 
-    def _extract_dimensions(self, raw_attrs) -> dict:
-        """
-        🌟 智能提取真实的包装尺寸，防止硬编码导致物流费亏损
-        """
-        dims = {"length": 10, "width": 10, "height": 10}
+    # ==========================================
+    # 数据清洗与解析核心模块
+    # ==========================================
+    def _get_clean_label(self, raw_value: str) -> str:
+        """清洗属性字符串，仅保留字母/数字/俄语/下划线，用于 SKU 组装"""
+        if not raw_value:
+            return ""
+        clean_text = re.sub(r'[^\w\s-]', '', str(raw_value)).strip()
+        return clean_text.replace(" ", "_")[:15]
 
+    def _generate_base_spu(self, product) -> str:
+        """生成唯一的基础 SPU 货号，格式：[前缀][年月]-[数据库自增ID]"""
+        prefix = getattr(settings, "SKU_PREFIX", "LP")
+        year_month = datetime.datetime.now().strftime("%y%m")
+        return f"{prefix}{year_month}-{product.id:06d}"
+
+    def _generate_smart_sku(self, base_spu: str, product, size_obj) -> str:
+        """动态生成智能 SKU 条码，格式：SPU[-颜色][-尺码]"""
+        color_segment = ""
+        try:
+            raw_attrs = product.attributes_json
+            # 统一解析为 Python 对象，防止字符串误判
+            attrs = json.loads(raw_attrs) if isinstance(raw_attrs, str) else raw_attrs
+
+            raw_color = ""
+            if isinstance(attrs, dict):
+                raw_color = attrs.get("Цвет") or attrs.get("color")
+            elif isinstance(attrs, list):
+                item = next((i for i in attrs if i.get("name") in {"Цвет", "color"}), None)
+                if item: raw_color = item.get("value")
+
+            if raw_color:
+                clean_color = self._get_clean_label(raw_color)
+                if clean_color:
+                    color_segment = f"-{clean_color}"
+        except Exception as e:
+            print(f"⚠️ 解析颜色属性时发生异常: {e}")
+
+        size_segment = ""
+        if size_obj:
+            tech_size = str(size_obj.tech_size).strip()
+            invalid_sizes = {"0", "no", "无", "один", "onesize", "none"}
+            if tech_size and tech_size.lower() not in invalid_sizes:
+                clean_size = self._get_clean_label(tech_size)
+                if clean_size:
+                    size_segment = f"-{clean_size}"
+
+        return f"{base_spu}{color_segment}{size_segment}"
+
+    def _extract_dimensions(self, raw_attrs) -> dict:
+        """提取真实的包装尺寸，加入 200cm 防呆限制"""
+        dims = {"length": 10, "width": 10, "height": 10}
         if not raw_attrs:
             return dims
 
         try:
-            attrs_dict = {}
             if isinstance(raw_attrs, str):
                 attrs_dict = json.loads(raw_attrs)
             elif isinstance(raw_attrs, dict):
                 attrs_dict = raw_attrs
             elif isinstance(raw_attrs, list):
                 attrs_dict = {item['name']: item['value'] for item in raw_attrs if 'name' in item}
+            else:
+                attrs_dict = json.loads(raw_attrs) if isinstance(raw_attrs, str) else raw_attrs
+
+            if isinstance(attrs_dict, list):
+                attrs_dict = {item['name']: item['value'] for item in attrs_dict if 'name' in item}
 
             key_map = {
                 "длина упаковки": "length",
@@ -89,82 +141,87 @@ class WBUploaderService:
                 "высота упаковки": "height"
             }
 
-            for k, v in attrs_dict.items():
-                k_lower = str(k).lower()
-                for ru_key, en_key in key_map.items():
-                    if ru_key in k_lower:
-                        match = re.search(r'\d+', str(v))
-                        if match:
-                            extracted_val = int(match.group())
-                            if extracted_val > 0:
-                                dims[en_key] = extracted_val
+            if isinstance(attrs_dict, dict):
+                for k, v in attrs_dict.items():
+                    k_lower = str(k).lower()
+                    for ru_key, en_key in key_map.items():
+                        if ru_key in k_lower:
+                            match = re.search(r'\d+', str(v))
+                            if match:
+                                val = int(match.group())
+                                if 0 < val <= 200:
+                                    dims[en_key] = val
+                                else:
+                                    print(f"⚠️ 解析到异常尺寸 {val}，已重置为默认值 10")
         except Exception as e:
             print(f"⚠️ 解析包装尺寸时发生异常: {e}，将使用默认尺寸")
 
         return dims
 
-    def create_wb_card(self, product, sizes) -> bool:
-        """
-        🌟 核心建品方法：动态注入尺寸、描述与 SKU 条码
-        """
-        url = "https://content-api.wildberries.ru/content/v2/cards/upload"
-        vendor_code = f"SKU-{product.nm_id}"
-
-        characteristics = []
+    def _convert_attrs_to_wb_format(self, raw_attrs) -> list:
+        """将数据库属性安全转为 WB 要求的特征列表"""
         try:
-            raw_attrs = product.attributes_json
-            if raw_attrs:
-                if isinstance(raw_attrs, str): raw_attrs = json.loads(raw_attrs)
-                if isinstance(raw_attrs, dict):
-                    characteristics = [{"name": str(k), "value": str(v)} for k, v in raw_attrs.items()]
-                elif isinstance(raw_attrs, list):
-                    characteristics = raw_attrs
-        except Exception as e:
-            print(f"⚠️ 属性解析失败: {e}")
+            if not raw_attrs: return []
+            data = json.loads(raw_attrs) if isinstance(raw_attrs, str) else raw_attrs
+            if isinstance(data, dict):
+                return [{"name": str(k), "value": str(v)} for k, v in data.items()]
+            return data if isinstance(data, list) else []
+        except:
+            return []
 
-        # 🌟 组装尺码数据，预先向 WB 注册我们自定义的 SKU 条码
+    # ==========================================
+    # Wildberries API 交互模块
+    # ==========================================
+    def create_wb_card(self, product, sizes) -> bool:
+        """提交建品任务，动态注入智能 SPU 和 SKU"""
+        url = f"{CONTENT_API_URL}/content/v2/cards/upload"
+
+        spu_vendor_code = self._generate_base_spu(product)
+
         sizes_payload = []
         for s in sizes:
+            smart_sku = self._generate_smart_sku(spu_vendor_code, product, s)
             sizes_payload.append({
                 "techSize": str(s.tech_size),
-                "wbSize": "",
+                "wbSize": str(getattr(s, 'wb_size', "") or ""),
                 "price": self._calc_price(product.price_rub),
-                "skus": [f"{vendor_code}-{s.tech_size}"]
+                "skus": [smart_sku]
             })
 
-        # 安全兜底：如果没有获取到尺码（或商品原本就没有尺码），默认生成一个 "0" 尺码
         if not sizes_payload:
-            sizes_payload = [{"techSize": "0", "wbSize": "", "price": 9999, "skus": [f"{vendor_code}-0"]}]
-
-        # 提取真实长宽高
-        real_dimensions = self._extract_dimensions(product.attributes_json)
+            sizes_payload = [{
+                "techSize": "0",
+                "wbSize": "",
+                "price": self._calc_price(product.price_rub),
+                "skus": [f"{spu_vendor_code}-0"]
+            }]
 
         payload = [{
-            "subjectID": product.subject_id,  # 动态类目
+            "subjectID": product.subject_id,
             "variants": [{
-                "vendorCode": vendor_code,
+                "vendorCode": spu_vendor_code,
                 "title": product.title,
-                "description": product.description or product.title,  # 使用真实描述
+                "description": product.description or product.title,
                 "brand": product.brand or "Нет бренда",
-                "dimensions": real_dimensions,
-                "characteristics": characteristics,
+                "dimensions": self._extract_dimensions(product.attributes_json),
+                "characteristics": self._convert_attrs_to_wb_format(product.attributes_json),
                 "sizes": sizes_payload
             }]
         }]
 
-        print(f"📦 [发送请求] 正在提交建品数据: {product.nm_id}")
+        print(f"📦 [发送请求] 正在提交建品数据: 货号 {spu_vendor_code}")
 
         try:
             resp = requests.post(url, headers=self.headers, json=payload, timeout=20)
             if resp.status_code == 200:
                 data = resp.json()
                 if not data.get("error"):
-                    print("✅ 建品任务提交成功！等待 WB 审核生成 nmID...")
+                    print(f"✅ 建品任务提交成功！等待 WB 分配 nmID...")
                     return True
                 else:
                     print(f"❌ WB 业务报错: {data.get('errorText')}")
             else:
-                print(f"❌ 请求失败 (HTTP {resp.status_code})")
+                print(f"❌ 请求失败 (HTTP {resp.status_code}): {resp.text}")
         except Exception as e:
             print(f"❌ 网络请求异常: {e}")
 
@@ -174,6 +231,7 @@ class WBUploaderService:
         folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
         if not folder_path.exists() or not folder_path.is_dir():
             return
+
         images = [str(p) for p in folder_path.glob("*.webp")]
         if not images: return
 
@@ -199,9 +257,6 @@ class WBUploaderService:
             for _ in as_completed(futures): pass
 
     def upload_video(self, folder_rel_path, nm_id):
-        """
-        🌟 修复后的视频上传：移除干扰参数，精准识别格式
-        """
         folder_path = Path(settings.base_data_dir) / str(folder_rel_path)
         videos = glob.glob(os.path.join(folder_path, "*.mp4")) + glob.glob(os.path.join(folder_path, "*.mov"))
         if not videos: return
@@ -220,8 +275,6 @@ class WBUploaderService:
         url = f"{CONTENT_API_URL}/content/v3/media/file"
         hdrs = self.headers.copy()
         hdrs.pop("Content-Type", None)
-
-        # 绝不传递 X-Photo-Number
         hdrs.update({"X-Nm-Id": str(nm_id)})
 
         mime_type = "video/quicktime" if filename.lower().endswith(".mov") else "video/mp4"
@@ -241,15 +294,11 @@ class WBUploaderService:
         url = f"{self.discount_url}/api/v2/upload/task"
         request_with_retry(url, method="POST", headers=self.headers, json={"data": discount_payload})
 
+    # ==========================================
+    # 核心异步编排引擎
+    # ==========================================
     async def process_publish(self, original_nm_ids, db_session: AsyncSession):
-        """
-        🌟 高性能批处理核心调度流
-        """
         repo = WBProductRepository(db_session)
-
-        # ==========================================
-        # 阶段 1：无阻塞批量提交建品任务
-        # ==========================================
         pending_products = {}
 
         print(f"\n🚀 [阶段 1] 开始批量提交 {len(original_nm_ids)} 个商品的建品请求...")
@@ -261,15 +310,14 @@ class WBUploaderService:
             product = await repo.get_product_by_nm(nm_id)
             if not product: continue
 
-            # 获取并传入 sizes
             sizes = await repo.get_sizes_by_product_id(product.id)
 
-            print(f"   ▶️ 正在提交: {product.title} (原始ID: {nm_id})")
+            print(f"   ▶️ 正在提交: {product.title} (源ID: {nm_id})")
             is_submitted = await asyncio.to_thread(self.create_wb_card, product, sizes)
 
             if is_submitted:
-                vendor_code = f"SKU-{product.nm_id}"
-                pending_products[vendor_code] = product
+                spu_vendor_code = self._generate_base_spu(product)
+                pending_products[spu_vendor_code] = product
             else:
                 print(f"   ❌ 商品 {nm_id} 建品请求失败")
 
@@ -279,13 +327,9 @@ class WBUploaderService:
             print("✅ 所有建品已提交完毕，暂无需要等待分配 nmID 的新商品。")
             return
 
-        # ==========================================
-        # 阶段 2：统一批量轮询真实的 nmID
-        # ==========================================
         print(f"\n⏳ [阶段 2] 开始为 {len(pending_products)} 个商品批量查询真实 nmID...")
         real_nm_ids_map = {}
-
-        url = "https://content-api.wildberries.ru/content/v2/get/cards/list"
+        url = f"{CONTENT_API_URL}/content/v2/get/cards/list"
         max_retries = 12
 
         for i in range(max_retries):
@@ -297,10 +341,7 @@ class WBUploaderService:
             payload = {
                 "settings": {
                     "cursor": {"limit": 100},
-                    "filter": {
-                        "withError": False,
-                        "vendorCodes": unresolved_codes
-                    }
+                    "filter": {"withError": False, "vendorCodes": unresolved_codes}
                 }
             }
 
@@ -321,35 +362,45 @@ class WBUploaderService:
             if len(real_nm_ids_map) < len(pending_products):
                 await asyncio.sleep(15)
 
-                # ==========================================
-        # 阶段 3：并发上传素材、改价、改库存并更新数据库
-        # ==========================================
         print(f"\n📸 [阶段 3] 开始为成功获取 nmID 的 {len(real_nm_ids_map)} 个商品同步物料...")
-
         for vendor_code, real_new_nm_id in real_nm_ids_map.items():
             product = pending_products[vendor_code]
             print(f"   ⚙️ 正在处理: {vendor_code} (目标 nmID: {real_new_nm_id})")
 
             sizes = await repo.get_sizes_by_product_id(product.id)
-            stocks_to_update = [{"sku": f"{vendor_code}-{s.tech_size}", "amount": s.stock_qty} for s in sizes]
+            stocks_to_update = []
+            for s in sizes:
+                smart_sku = self._generate_smart_sku(vendor_code, product, s)
+                stocks_to_update.append({"sku": smart_sku, "amount": s.stock_qty})
+
             fake_price = self._calc_price(product.price_rub)
             discount_payload = [{"nmID": real_new_nm_id, "price": fake_price, "discount": random.randint(40, 70)}]
 
             try:
-                # 核心并发网路请求
+                print("      📥 正在上传媒体素材 (图片/视频)...")
                 await asyncio.gather(
                     asyncio.to_thread(self.upload_images_concurrently, product.local_folder, real_new_nm_id),
-                    asyncio.to_thread(self.upload_video, product.local_folder, real_new_nm_id),
+                    asyncio.to_thread(self.upload_video, product.local_folder, real_new_nm_id)
+                )
+
+                # 缓冲时间，等待 WB 服务器激活 nmID 和卡片状态
+                await asyncio.sleep(3)
+
+                print("      💰 正在同步价格与库存...")
+                await asyncio.gather(
                     asyncio.to_thread(self.update_stocks, stocks_to_update),
                     asyncio.to_thread(self.set_discounts, discount_payload)
                 )
 
+                # 安全落库
                 await repo.record_publish(product.nm_id, self.target_store, real_new_nm_id, vendor_code)
 
-                # 重命名本地文件夹
+                # 极度安全的文件重命名，防止二次运行导致任务链崩溃
                 old_path = os.path.join(settings.base_data_dir, product.local_folder)
                 new_path = f"{old_path}_已刊登"
-                if os.path.exists(old_path) and not os.path.exists(new_path):
+                if os.path.exists(old_path):
+                    if os.path.exists(new_path):
+                        shutil.rmtree(new_path)
                     os.rename(old_path, new_path)
 
                 print(f"   🎉 商品 {vendor_code} 全流程上架完成！\n")
