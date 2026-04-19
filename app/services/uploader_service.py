@@ -79,7 +79,7 @@ class WBUploaderService:
 
     def _generate_base_spu(self, product) -> str:
         """生成唯一的基础 SPU 货号，格式：[前缀][年月]-[数据库自增ID]"""
-        prefix = getattr(settings, "SKU_PREFIX", "LP")
+        prefix = getattr(settings, "SKU_PREFIX", "SKU-")
         year_month = datetime.datetime.now().strftime("%y%m")
         return f"{prefix}{year_month}-{product.id:06d}"
 
@@ -374,7 +374,8 @@ class WBUploaderService:
                 stocks_to_update.append({"sku": smart_sku, "amount": s.stock_qty})
 
             fake_price = self._calc_price(product.price_rub)
-            discount_payload = [{"nmID": real_new_nm_id, "price": fake_price, "discount": random.randint(40, 70)}]
+            current_discount =  random.randint(40, 70)
+            discount_payload = [{"nmID": real_new_nm_id, "price": fake_price, "discount": current_discount}]
 
             try:
                 print("      📥 正在上传媒体素材 (图片/视频)...")
@@ -393,15 +394,7 @@ class WBUploaderService:
                 )
 
                 # 安全落库
-                await repo.record_publish(product.nm_id, self.target_store, real_new_nm_id, vendor_code)
-
-                # 极度安全的文件重命名，防止二次运行导致任务链崩溃
-                old_path = os.path.join(settings.base_data_dir, product.local_folder)
-                new_path = f"{old_path}_已刊登"
-                if os.path.exists(old_path):
-                    if os.path.exists(new_path):
-                        shutil.rmtree(new_path)
-                    os.rename(old_path, new_path)
+                await repo.record_publish(product.nm_id, self.target_store, real_new_nm_id, vendor_code,fake_price,current_discount)
 
                 print(f"   🎉 商品 {vendor_code} 全流程上架完成！\n")
             except Exception as e:

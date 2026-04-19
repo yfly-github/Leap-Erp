@@ -51,5 +51,8 @@ class WBPublishRecordEntity(Base):
     original_nm_id = Column(Integer, index=True)
     target_store = Column(String(50), index=True)
     my_nm_id = Column(Integer)
+
+    published_price_rub = Column(Float, comment="刊登时推送的基础原价(卢布)")
+    published_discount = Column(Integer, comment="刊登时推送的折扣比例(%)")
     my_vendor_code = Column(String(100))
     published_at = Column(DateTime, default=datetime.now)
